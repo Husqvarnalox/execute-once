@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: relay
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/app}
+    username: ${DB_USER:app}
+    password: ${DB_PASSWORD:app}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    producer:
+      acks: all
+      retries: 5
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        delivery.timeout.ms: 120000
+  redis:
+    url: ${REDIS_URL:redis://localhost:6379}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+relay:
+  poll-interval-ms: 1000
+  batch-size: 50
+  max-attempts: 10
+  base-backoff-ms: 500
+  rate-limit-per-second: 200
+  topic: events

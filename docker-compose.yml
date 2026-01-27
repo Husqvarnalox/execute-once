@@ -1,0 +1,124 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9644/v1/status/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  gateway:
+    build: ./services/gateway-node
+    environment:
+      PORT: 3000
+      PGHOST: postgres
+      PGUSER: app
+      PGPASSWORD: app
+      PGDATABASE: app
+      PGPORT: 5432
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+  relay:
+    build: ./services/relay-java
+    environment:
+      SPRING_PROFILES_ACTIVE: relay
+      DB_URL: jdbc:postgresql://postgres:5432/app
+      DB_USER: app
+      DB_PASSWORD: app
+      KAFKA_BOOTSTRAP: redpanda:9092
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  consumer:
+    build: ./services/consumer-java
+    environment:
+      SPRING_PROFILES_ACTIVE: consumer
+      DB_URL: jdbc:postgresql://postgres:5432/app
+      DB_USER: app
+      DB_PASSWORD: app
+      KAFKA_BOOTSTRAP: redpanda:9092
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  bench:
+    build: ./scripts/python-bench
+    environment:
+      TARGET_URL: http://gateway:3000/api/events
+      KAFKA_BOOTSTRAP: redpanda:9092
+      REDIS_URL: redis://redis:6379
+      DB_URL: postgresql://app:app@postgres:5432/app
+    depends_on:
+      gateway:
+        condition: service_started
+      redpanda:
+        condition: service_healthy
+
+volumes:
+  pgdata:
