@@ -47,91 +47,88 @@ app.post('/api/events', async (req, res) => {
   try {
     const cached = await redis.get(cacheKey);
     if (cached) {
+      const entry = JSON.parse(cached);
+      if (entry.hash !== hash) {
+        return res.status(409).json({ error: 'Idempotency key reused with different payload' });
+      }
       log.debug({ idemKey }, 'hit redis cache');
-      return res.json(JSON.parse(cached));
+      return res.status(entry.status).json(entry.body);
     }
   } catch (err) {
     log.warn({ err }, 'redis unavailable, fallback to postgres');
   }
 
+  const cacheResponse = async (status, body, ttl) => {
+    try {
+      await redis.set(cacheKey, JSON.stringify({ hash, status, body }), 'EX', ttl);
+    } catch (err) {
+      log.warn({ err }, 'redis set failed');
+    }
+  };
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    // ON CONFLICT closes the race between two first-time requests with the same key:
+    // the loser waits on the winner's row lock in the SELECT below instead of failing.
+    await client.query(
+      "INSERT INTO idempotency_keys(idem_key, request_hash, status) VALUES ($1, $2, 'IN_PROGRESS') ON CONFLICT (idem_key) DO NOTHING",
+      [idemKey, hash]
+    );
     const lock = await client.query(
-      'SELECT idem_key, request_hash, status, response_body FROM idempotency_keys WHERE idem_key = $1 FOR UPDATE',
+      'SELECT request_hash, status, response_body FROM idempotency_keys WHERE idem_key = $1 FOR UPDATE',
       [idemKey]
     );
+    const row = lock.rows[0];
 
-    if (lock.rowCount > 0) {
-      const row = lock.rows[0];
-      if (row.request_hash !== hash) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Idempotency key reused with different payload' });
-      }
+    if (row.request_hash !== hash) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Idempotency key reused with different payload' });
+    }
 
-      if (row.status === 'COMPLETED') {
-        await client.query('COMMIT');
-        const response = row.response_body;
-        try {
-          await redis.set(cacheKey, JSON.stringify(response), 'EX', IDEM_TTL_SECONDS);
-        } catch (err) {
-          log.warn({ err }, 'redis set failed for completed replay');
-        }
-        return res.json(response);
-      }
-
-      if (row.status === 'IN_PROGRESS') {
-        await client.query('ROLLBACK');
-        try {
-          await redis.set(cacheKey, JSON.stringify({ status: 'processing' }), 'EX', IDEM_PROGRESS_TTL_SECONDS);
-        } catch (err) {
-          log.warn({ err }, 'redis set failed for in-progress');
-        }
-        return res.status(202).json({ status: 'processing' });
-      }
-    } else {
-      await client.query(
-        'INSERT INTO idempotency_keys(idem_key, request_hash, status) VALUES ($1, $2, $3)',
-        [idemKey, hash, 'IN_PROGRESS']
-      );
+    if (row.status === 'COMPLETED') {
+      await client.query('COMMIT');
+      await cacheResponse(202, row.response_body, IDEM_TTL_SECONDS);
+      return res.status(202).json(row.response_body);
     }
 
     const eventId = uuidv4();
-    const eventPayload = payload;
     await client.query(
       'INSERT INTO outbox_events(event_id, idem_key, event_type, payload, status) VALUES ($1,$2,$3,$4,$5)',
-      [eventId, idemKey, 'demo.event', eventPayload, 'PENDING']
+      [eventId, idemKey, 'demo.event', payload, 'PENDING']
     );
 
     const responseBody = { event_id: eventId, status: 'accepted' };
-
     await client.query(
       'UPDATE idempotency_keys SET status=$2, response_body=$3 WHERE idem_key=$1',
       [idemKey, 'COMPLETED', responseBody]
     );
-
     await client.query('COMMIT');
 
-    try {
-      await redis.set(cacheKey, JSON.stringify(responseBody), 'EX', IDEM_TTL_SECONDS);
-    } catch (err) {
-      log.warn({ err }, 'redis set failed after commit');
-    }
-
+    await cacheResponse(202, responseBody, IDEM_TTL_SECONDS);
     res.status(202).json(responseBody);
   } catch (err) {
-    await client.query('ROLLBACK');
-    log.error({ err }, 'failed to process request');
     try {
-      await client.query('UPDATE idempotency_keys SET status=$2 WHERE idem_key=$1', [idemKey, 'FAILED']);
+      await client.query('ROLLBACK');
     } catch (_) {}
+    log.error({ err }, 'failed to process request');
     res.status(500).json({ error: 'internal_error' });
   } finally {
     client.release();
   }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   log.info(`Gateway listening on ${PORT}`);
 });
+
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    server.close(async () => {
+      await pool.end().catch(() => {});
+      redis.disconnect();
+      process.exit(0);
+    });
+  });
+}

@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+      - name: Gateway syntax check
+        working-directory: services/gateway-node
+        run: |
+          npm install --omit=dev
+          node --check index.js
+      - name: Relay build
+        run: mvn -q -B -f services/relay-java/pom.xml verify
+      - name: Consumer build
+        run: mvn -q -B -f services/consumer-java/pom.xml verify
+      - name: Compose config
+        run: docker compose config -q
+      - name: Bench syntax check
+        run: python3 -m py_compile scripts/python-bench/run.py

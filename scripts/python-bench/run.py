@@ -35,25 +35,25 @@ async def send_one(session: aiohttp.ClientSession, payload: Dict, idem_key: str)
 async def run_profile(name: str, total: int, dup_ratio: float):
     stats = {"accepted": 0, "errors": 0, "processing": 0}
     idem_pool = []
+    payloads = {}
     start = time.time()
     async with aiohttp.ClientSession(json_serialize=json_dumps) as session:
         tasks = []
         for i in range(total):
-            payload = make_payload(i)
             if idem_pool and random.random() < dup_ratio:
                 idem_key = random.choice(idem_pool)
             else:
                 idem_key = str(uuid.uuid4())
                 idem_pool.append(idem_key)
+                payloads[idem_key] = make_payload(i)
+            payload = payloads[idem_key]
             tasks.append(asyncio.create_task(send_one(session, payload, idem_key)))
         for coro in asyncio.as_completed(tasks):
             status, body = await coro
-            if status in (200, 202):
-                stats["accepted"] += 1
-            elif status == 0:
-                stats["errors"] += 1
-            elif status == 202:
+            if status in (200, 202) and body.get("status") == "processing":
                 stats["processing"] += 1
+            elif status in (200, 202):
+                stats["accepted"] += 1
             else:
                 stats["errors"] += 1
     duration = time.time() - start

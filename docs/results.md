@@ -1,10 +1,9 @@
-# Результаты (шаблон)
+# Results
 
-Заполняйте после прогона профилей.
+No benchmark results are published yet. Fill the table after running the profiles from
+[experiments.md](experiments.md) and state the hardware used.
 
-| профайл | req | e2e p50 | e2e p95 | accepted | duplicates | lost | notes |
-|---------|-----|--------|--------|----------|------------|------|-------|
-| normal  |     |        |        |          | 0          | 0    |       |
-| dup30   |     |        |        |          | 0          | 0    |       |
-
-Дополнительно: графики lag Kafka, backlog outbox, распределение attempts (relay). Используйте Grafana/Prometheus или выгрузки в CSV.
+| profile | requests | e2e p50 | e2e p95 | accepted | duplicate effects | lost | notes |
+|---------|----------|---------|---------|----------|-------------------|------|-------|
+| normal  |          |         |         |          |                   |      |       |
+| dup30   |          |         |         |          |                   |      |       |

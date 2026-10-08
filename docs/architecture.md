@@ -1,44 +1,42 @@
-# Практически однократная обработка (Node + Java + Kafka + Postgres + Redis)
+# Architecture
 
-## Потоки
-- **Gateway (Node)**: HTTP intake, idem по `Idempotency-Key`, транзакция `idempotency_keys + outbox_events`, ответ `{event_id, accepted}`; горячий кэш ответов в Redis.
-- **Outbox Relay (Java)**: читает `outbox_events` с `FOR UPDATE SKIP LOCKED`, проверяет rate limit в Redis, публикует в Kafka (`acks=all`, `enable.idempotence=true`), backoff+jitter, фиксирует `relay_attempts` и статусы `PUBLISHED/FAILED`.
-- **Consumer (Java)**: rate-limit/семафоры через Redis, транзакция `inbox_events` (unique) + бизнес-эффект (`business_state`), только после commit — ACK offset; дубли гасит уникальный ключ inbox.
-- **Kafka/Redpanda**: транспорт, партиционирование по `event_id/tenant`, хранение для replay.
-- **Redis**: hot idem cache, rate limiting, опционально семафоры; не источник истины.
-- **Postgres**: источник истины (idem/outbox/inbox/business/audit).
-- **Python bench**: нагрузка, дубли, быстрые smoke-тесты инвариантов.
+## Data flow
+- **Gateway (Node.js):** HTTP intake keyed by `Idempotency-Key`. One transaction covers `idempotency_keys` and
+  `outbox_events`. Response: `202 {event_id, status}`. A Redis cache (storing request hash, status and body) serves
+  replays; Postgres remains authoritative.
+- **Relay (Java):** claims `outbox_events` rows with `FOR UPDATE SKIP LOCKED`, leases them for 15 s, publishes to
+  Kafka (`acks=all`, `enable.idempotence=true`, key = `event_id`), then marks `PUBLISHED`. Failures back off
+  exponentially with jitter up to `max-attempts`, then `FAILED`. Every attempt is recorded in `relay_attempts`.
+- **Consumer (Java):** manual ack. In one transaction it inserts `inbox_events(event_id)` and `business_state`;
+  a unique-key violation on the inbox means a duplicate. The offset is acknowledged after commit.
+- **Redis:** response cache and fixed-window rate limiting. Not a source of truth; all uses fail open.
+- **PostgreSQL:** source of truth for idempotency, outbox, inbox and business state.
 
-## Таблицы (см. `migrations/001_init.sql`)
+## Tables (`migrations/001_init.sql`)
 - `idempotency_keys(idem_key, request_hash, status, response_body, timestamps)`
 - `outbox_events(event_id, idem_key, event_type, payload, status, attempt, next_attempt_at, published_at)`
 - `inbox_events(event_id, received_at)`
-- `business_state(event_id, amount, note)`
-- журналы `relay_attempts`, `consumer_attempts`
+- `business_state(event_id UNIQUE, amount, note)`
+- `relay_attempts`, `consumer_attempts` — attempt logs
 
-## Гарантии
-1. Idempotent intake: повтор с тем же ключом → тот же ответ, без новой записи в outbox.
-2. Durable event creation: `202 accepted` ⇒ событие записано в outbox.
-3. At-least-once до Kafka (relay с ретраями и idempotent producer).
-4. Exactly-once эффекта: inbox unique + транзакция side-effect.
-5. No silent loss: каждое принятое событие в терминальном состоянии `APPLIED` или `FAILED`.
+## Guarantees
+1. Idempotent intake: the same key and payload returns the original response and creates no new outbox row.
+2. Durable acceptance: a `202` means the outbox row is committed.
+3. At-least-once publication to Kafka.
+4. Exactly-once business effect: `inbox_events` primary key plus a single transaction for the effect.
 
-## Состояния
-- Idempotency: `IN_PROGRESS → COMPLETED|FAILED`.
-- Outbox: `PENDING → PUBLISHED | FAILED` (backoff по attempt).
-- Inbox: запись появляется один раз; повторы не меняют состояние.
+Not guaranteed: ordering across events, delivery of events whose relay attempts are exhausted (`FAILED`), or recovery
+of consumer records skipped after the error handler gives up (see Limitations in the README).
+
+## State machines
+- Idempotency: `IN_PROGRESS → COMPLETED` (within one transaction, so `IN_PROGRESS` is not externally visible).
+- Outbox: `PENDING → PUBLISHED | FAILED`.
+- Inbox: a row appears once; repeats are logged as `DUPLICATE`.
 
 ## Rate limiting
-- Ключи Redis: `rl:gateway:<tenant>:<window>`, `rl:relay:global:<sec>`, `rl:consumer:<tenant>:<sec>`, `sem:consumer:<tenant>`.
-- Алгоритм: token bucket / fixed window (реализация в коде — простое окно per-second).
+Fixed one-second windows in Redis: `rl:relay:global:<epoch-second>` and `rl:consumer:global:<epoch-second>`. When
+Redis is unreachable the limiters allow traffic.
 
-## Инварианты
-- Нет дублей эффекта по `event_id`.
-- Нет потерь: принятое событие либо применено, либо прозрачно `FAILED`.
-- Повторы доставки не изменяют бизнес-состояние.
-- Рестарты компонентов сохраняют инварианты.
-
-## Наблюдаемость
-- Логи структурные (pino/slf4j).
-- Метрики Prometheus из Spring Boot; Redis hit ratio/rl hits в логах.
-- Основные KPI: backlog outbox, consumer lag, e2e latency, retries, rate-limit hits.
+## Observability
+Structured logs (pino in the gateway, SLF4J in the Java services). The Java services expose Spring Boot Actuator
+endpoints including Prometheus metrics. Useful signals: outbox backlog, consumer lag, retry counts.

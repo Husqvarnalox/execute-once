@@ -114,7 +114,7 @@ public class OutboxRelay {
                     jdbcTemplate.update(
                             "UPDATE outbox_events SET attempt=?, next_attempt_at=now() + make_interval(secs => ?) WHERE event_id=?",
                             nextAttempt,
-                            delay.toSeconds(),
+                            delay.toMillis() / 1000.0,
                             event.eventId());
                 }
                 jdbcTemplate.update("INSERT INTO relay_attempts(event_id, attempt, status, error) VALUES (?,?,?,?)",

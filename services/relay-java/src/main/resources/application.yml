@@ -14,8 +14,9 @@ spring:
         enable.idempotence: true
         max.in.flight.requests.per.connection: 5
         delivery.timeout.ms: 120000
-  redis:
-    url: ${REDIS_URL:redis://localhost:6379}
+  data:
+    redis:
+      url: ${REDIS_URL:redis://localhost:6379}
 
 management:
   endpoints:
