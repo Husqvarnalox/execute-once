@@ -20,8 +20,8 @@ jobs:
       run:
         working-directory: services/gateway-node
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -40,8 +40,8 @@ jobs:
       matrix:
         module: [relay-java, consumer-java]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 21
@@ -55,7 +55,7 @@ jobs:
         run: ./mvnw -B -pl ${{ matrix.module }} verify
       - name: Surefire and failsafe reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.module }}-reports
           path: |
@@ -69,8 +69,8 @@ jobs:
       run:
         working-directory: scripts/python-bench
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install ruff
@@ -83,8 +83,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - name: Validate Compose file
         run: docker compose config -q
       - name: Build images
@@ -106,7 +106,7 @@ jobs:
             --profile normal --total 500 --concurrency 50 --report /out/normal.json
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-reports
           path: e2e-out/
