@@ -55,7 +55,7 @@ jobs:
         run: ./mvnw -B -pl ${{ matrix.module }} verify
       - name: Surefire and failsafe reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.module }}-reports
           path: |
@@ -103,7 +103,7 @@ jobs:
             --profile normal --total 500 --concurrency 50 --report /out/normal.json
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-reports
           path: e2e-out/
