@@ -1,83 +1,82 @@
+# Local development stack. Credentials below are for this Compose network only.
+# `make up` builds everything and waits for health checks; `make e2e` runs the load generator with verification.
+# Host ports can be moved if they clash with something else on your machine, e.g.
+#   POSTGRES_PORT=15432 REDIS_PORT=16379 docker compose up -d
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-java-env: &java-env
+  DB_URL: jdbc:postgresql://postgres:5432/app
+  DB_USER: app
+  DB_PASSWORD: app
+  KAFKA_BOOTSTRAP: redpanda:9092
+  REDIS_URL: redis://redis:6379
+
 services:
   postgres:
-    image: postgres:15
+    image: postgres:16.6-alpine
     environment:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
       POSTGRES_DB: app
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
+      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U app"]
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
       interval: 5s
       timeout: 5s
-      retries: 5
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+      retries: 10
+    logging: *logging
 
   redis:
-    image: redis:7
+    image: redis:7.4-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+    logging: *logging
 
   redpanda:
-    image: redpandadata/redpanda:v24.1.7
+    image: redpandadata/redpanda:v24.2.7
     command:
       - redpanda
       - start
-      - --overprovisioned
-      - --smp
-      - "1"
-      - --memory
-      - 1G
-      - --reserve-memory
-      - 0M
-      - --node-id
-      - "0"
-      - --check=false
-      - --kafka-addr
-      - PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr
-      - PLAINTEXT://redpanda:9092
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
     ports:
-      - "9092:9092"
-      - "9644:9644"
+      - "${KAFKA_PORT:-9092}:9092"
+      - "${REDPANDA_ADMIN_PORT:-9644}:9644"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9644/v1/status/ready"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+      test: ["CMD-SHELL", "rpk cluster health --exit-when-healthy || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+    logging: *logging
 
   gateway:
     build: ./services/gateway-node
+    image: execute-once/gateway:local
     environment:
       PORT: 3000
       PGHOST: postgres
+      PGPORT: 5432
       PGUSER: app
       PGPASSWORD: app
       PGDATABASE: app
-      PGPORT: 5432
       REDIS_URL: redis://redis:6379
       LOG_LEVEL: info
     depends_on:
@@ -86,22 +85,14 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "3000:3000"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+      - "${GATEWAY_PORT:-3000}:3000"
+    logging: *logging
 
   relay:
     build: ./services/relay-java
+    image: execute-once/relay:local
     environment:
-      SPRING_PROFILES_ACTIVE: relay
-      DB_URL: jdbc:postgresql://postgres:5432/app
-      DB_USER: app
-      DB_PASSWORD: app
-      KAFKA_BOOTSTRAP: redpanda:9092
-      REDIS_URL: redis://redis:6379
+      <<: *java-env
     depends_on:
       postgres:
         condition: service_healthy
@@ -109,21 +100,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+    ports:
+      - "${RELAY_PORT:-8081}:8080"
+    logging: *logging
 
   consumer:
     build: ./services/consumer-java
+    image: execute-once/consumer:local
     environment:
-      SPRING_PROFILES_ACTIVE: consumer
-      DB_URL: jdbc:postgresql://postgres:5432/app
-      DB_USER: app
-      DB_PASSWORD: app
-      KAFKA_BOOTSTRAP: redpanda:9092
-      REDIS_URL: redis://redis:6379
+      <<: *java-env
     depends_on:
       postgres:
         condition: service_healthy
@@ -131,29 +116,25 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+    ports:
+      - "${CONSUMER_PORT:-8082}:8080"
+    logging: *logging
 
   bench:
     build: ./scripts/python-bench
+    image: execute-once/bench:local
+    profiles: ["bench"]
     environment:
       TARGET_URL: http://gateway:3000/api/events
-      KAFKA_BOOTSTRAP: redpanda:9092
-      REDIS_URL: redis://redis:6379
       DB_URL: postgresql://app:app@postgres:5432/app
     depends_on:
       gateway:
-        condition: service_started
-      redpanda:
         condition: service_healthy
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+      relay:
+        condition: service_healthy
+      consumer:
+        condition: service_healthy
+    logging: *logging
 
 volumes:
   pgdata:

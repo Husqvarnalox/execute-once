@@ -17,3 +17,9 @@
 **/.DS_Store
 Dockerfile
 .dockerignore
+__pycache__
+**/*.pyc
+.ruff_cache
+.pytest_cache
+report*.json
+pyproject.toml

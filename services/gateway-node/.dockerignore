@@ -17,3 +17,8 @@
 **/.DS_Store
 Dockerfile
 .dockerignore
+test
+eslint.config.js
+.prettierrc*
+.prettierignore
+coverage

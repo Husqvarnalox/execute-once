@@ -1,0 +1,32 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /services/gateway-node
+    schedule:
+      interval: weekly
+    groups:
+      gateway-deps:
+        patterns: ["*"]
+  - package-ecosystem: maven
+    directory: /services
+    schedule:
+      interval: weekly
+    groups:
+      spring:
+        patterns: ["org.springframework*"]
+  - package-ecosystem: pip
+    directory: /scripts/python-bench
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directories:
+      - /services/gateway-node
+      - /services/relay-java
+      - /services/consumer-java
+      - /scripts/python-bench
+    schedule:
+      interval: weekly

@@ -2,134 +2,207 @@
 
 [![CI](https://github.com/Husqvarnalox/execute-once/actions/workflows/ci.yml/badge.svg)](https://github.com/Husqvarnalox/execute-once/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![Java 21](https://img.shields.io/badge/Java-21-007396?logo=openjdk&logoColor=white)
+![Node 22](https://img.shields.io/badge/Node-22-339933?logo=node.js&logoColor=white)
+![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
 
-A reference implementation of idempotent, end-to-end event processing across Node.js, PostgreSQL, Kafka-compatible
-messaging (Redpanda) and Java. Requests are accepted once per `Idempotency-Key`, published through a transactional
-outbox, and applied exactly once to business state through an inbox table — even when delivery is retried or duplicated.
+Exactly-once business effect over at-least-once delivery, built from first principles and verified under load.
 
-## Why
+A client sends a request with an `Idempotency-Key`. The request is accepted once, published through a transactional
+outbox to Kafka, and applied once to business state through an inbox table, no matter how many times the client
+retries, the relay restarts or Kafka redelivers. Every link in that chain is a small, explicit piece of code with a
+test that breaks it on purpose.
 
-Kafka's idempotent producer and `acks=all` prevent duplicates *inside* a producer session, not across a database write,
-a relay restart and a consumer retry. Real "exactly once" between a database and a business effect is built from
-at-least-once delivery plus deduplication at the point of effect. This project makes that chain explicit and
-testable.
+## Why this exists
 
-The guarantee it targets: **exactly-once business effect under at-least-once delivery**, assuming Postgres is the
-source of truth and the consumer applies effects only inside the same transaction that records the inbox row.
+Kafka's idempotent producer and `acks=all` prevent duplicates inside one producer session. They say nothing about the
+gap between a database commit and a publish, a relay that dies after publishing but before recording it, or a consumer
+that crashes after writing but before committing its offset. "Exactly once" between a database and a business effect
+is not a flag; it is at-least-once delivery plus deduplication at the point of effect, with the deduplication record and
+the effect in the same transaction.
+
+This repository makes that chain explicit, documents each decision in an [ADR](docs/adr/README.md), and ships the
+tooling to prove the invariants hold: Testcontainers tests per service and a load generator that verifies the database
+after every run.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    C[Client] -->|POST /api/events<br/>Idempotency-Key| G[Node gateway]
-    G -->|one tx: idempotency_keys + outbox_events| P[(PostgreSQL)]
-    G -. response cache .-> R[(Redis)]
-    P -->|SELECT ... FOR UPDATE SKIP LOCKED| REL[Java relay]
-    REL -->|acks=all, idempotent producer| K[[Kafka / Redpanda]]
+    C[Client] -->|POST /api/events<br/>Idempotency-Key| G[Gateway<br/>Node 22]
+    G -->|one tx: idempotency_keys + outbox_events| P[(PostgreSQL 16)]
+    G -. replay cache .-> R[(Redis 7)]
+    P -->|SELECT ... FOR UPDATE SKIP LOCKED<br/>+ lease| REL[Relay<br/>Spring Boot 3.5]
+    REL -->|acks=all, idempotent producer| K[[Redpanda<br/>topic: events]]
     REL -->|mark PUBLISHED| P
-    K --> CON[Java consumer]
+    K --> CON[Consumer<br/>Spring Boot 3.5]
     CON -->|one tx: inbox_events + business_state| P
+    CON -. poison / exhausted .-> DLQ[[events.dlq]]
 ```
 
-| Component | Role |
-|---|---|
-| `services/gateway-node` | HTTP intake. Locks the idempotency row, writes the outbox event and the stored response in a single transaction. Redis is a replay cache only. |
-| `services/relay-java` | Polls `outbox_events` with `SKIP LOCKED`, leases rows, publishes to Kafka, retries with exponential backoff and jitter, records attempts. |
-| `services/consumer-java` | Manual-ack Kafka consumer. Inserts into `inbox_events` (primary key = `event_id`) and applies the effect in the same transaction; duplicates hit the unique key and are skipped. |
-| `scripts/python-bench` | Load generator with unique-key and duplicate-key profiles. |
+| Component | Role | Key guarantee |
+|---|---|---|
+| [`services/gateway-node`](services/gateway-node) | HTTP intake. Locks the idempotency row, writes the outbox event and the stored response in one transaction. | A `202` means a durable event exists. Same key + same payload replays; same key + different payload is `409`. |
+| [`services/relay-java`](services/relay-java) | Polls `outbox_events` with `SKIP LOCKED`, leases rows, publishes, retries with capped jittered backoff, prunes old rows. | At-least-once publication; a crash mid-batch is recovered by lease expiry, never by an operator. |
+| [`services/consumer-java`](services/consumer-java) | Manual-ack listener. Inserts into `inbox_events` (PK = `event_id`) and applies the effect in the same transaction. | Exactly-once effect. Duplicates are recorded, poison records are dead-lettered with a terminal row. |
+| [`scripts/python-bench`](scripts/python-bench) | Load generator with unique, duplicate-heavy and burst profiles, then verifies invariants directly in Postgres. | The same tool runs in CI and produced the numbers in [`docs/results.md`](docs/results.md). |
+
+The full data flow, state machines and table layout are in [`docs/architecture.md`](docs/architecture.md).
 
 ## Quick start
 
-Requires Docker with Compose.
+Requires Docker with Compose v2. The first build takes a few minutes (Maven and npm caches are cold).
 
 ```bash
-docker compose up -d --build
+make up
+```
 
+```bash
 curl -i -X POST http://localhost:3000/api/events \
   -H 'Idempotency-Key: demo-1' \
   -H 'Content-Type: application/json' \
-  -d '{"amount":10,"note":"demo"}'
-
-# Repeat the same command: same event_id, no second outbox row.
-docker compose exec postgres psql -U app -c "select * from business_state"
+  -d '{"amount": 10, "note": "demo"}'
 ```
 
-Tear down with `docker compose down -v`. The credentials in `docker-compose.yml` are for local development only.
-
-## How it works
-
-1. **Intake.** The gateway inserts the idempotency row (`ON CONFLICT DO NOTHING`), then `SELECT ... FOR UPDATE`. A
-   concurrent request with the same key waits on that lock and then replays the stored response. The same key with a
-   different payload hash returns `409`.
-2. **Outbox.** The event row and the `COMPLETED` response are committed atomically with the idempotency row, so a `202`
-   implies a durable event.
-3. **Relay.** Rows are claimed in a transaction and leased by pushing `next_attempt_at` 15 s ahead. If the relay
-   crashes after publishing but before marking `PUBLISHED`, the lease expires and the event is published again —
-   the duplicate is absorbed downstream.
-4. **Consumer.** Offsets are acknowledged only after the database transaction commits. A redelivered `event_id` fails
-   the `inbox_events` insert and is recorded as `DUPLICATE`.
-
-Details and invariants: [docs/architecture.md](docs/architecture.md). Failure scenarios and verification SQL:
-[docs/experiments.md](docs/experiments.md).
-
-## Failure scenarios covered by design
-
-| Scenario | Outcome |
-|---|---|
-| Client retries the same `Idempotency-Key` | Same response, one outbox row |
-| Same key, different payload | `409` |
-| Relay crashes after publish, before status update | Event republished after lease expiry; inbox deduplicates |
-| Duplicate Kafka delivery / consumer crash before ack | Redelivered; inbox deduplicates |
-| Redis unavailable | Gateway falls back to Postgres; rate limiters fail open |
-| Kafka unavailable | Outbox rows back off and retry up to `max-attempts`, then `FAILED` |
-
-These are specified by the design and exercised manually using the steps in `docs/experiments.md`; there is no
-automated failure-injection suite yet.
-
-## Load profiles
+Run the same command again and you get the same `event_id` with `Idempotency-Replayed: true`. Change the amount and
+you get `409`. Watch the event travel:
 
 ```bash
-docker compose run --rm bench python run.py --profile normal --total 200
-docker compose run --rm bench python run.py --profile dup30 --total 500
+curl -s http://localhost:3000/api/events/<event_id> | jq
 ```
 
-`dup30` repeats 30% of idempotency keys. After a run, check the invariants with the SQL in
-[docs/experiments.md](docs/experiments.md). Result tables in [docs/results.md](docs/results.md) are intentionally empty;
-no benchmark numbers are published.
+`status` moves `pending` → `published` → `applied`. Then prove nothing was duplicated:
+
+```bash
+make e2e
+```
+
+That starts the stack, sends 500 requests of which 30% reuse an earlier key, waits for every event to reach
+`business_state`, and checks the invariants (no duplicate effects, no lost events, no stuck rows, one outbox row per
+key). It exits non-zero if any of them fail. `make down` tears everything down. If the default host ports are taken,
+override them: `POSTGRES_PORT=15432 REDIS_PORT=16379 make up`.
+
+Measured on a laptop with the default configuration (details in [`docs/results.md`](docs/results.md)):
+
+| Profile | Requests | Gateway p99 | Accept → applied p95 | Duplicate effects | Lost |
+|---|---|---|---|---|---|
+| 30% duplicate keys, 50 concurrent | 1000 | 37 ms | 0.63 s | 0 | 0 |
+| unique keys, 200 concurrent | 2000 | 95 ms | 2.4 s | 0 | 0 |
+| unique keys, relay killed mid-run | 3000 | 162 ms | 9.3 s | 0 | 0 |
+
+## How the guarantee is built
+
+1. **Intake** (ADR [0003](docs/adr/0003-idempotency-key-lock-and-hash.md)). `INSERT ... ON CONFLICT DO NOTHING`
+   followed by `SELECT ... FOR UPDATE` on the key row. Two concurrent first-time requests serialize on the row lock
+   instead of racing; the loser wakes up and replays the winner's response. The request hash is computed over
+   canonical JSON, so key order does not matter.
+2. **Outbox** (ADR [0001](docs/adr/0001-transactional-outbox.md)). The event row and the `COMPLETED` response commit
+   atomically with the idempotency row. There is no code path that returns `202` without a committed outbox row.
+3. **Relay** (ADR [0004](docs/adr/0004-lease-based-claiming.md)). Rows are claimed with `FOR UPDATE SKIP LOCKED` and
+   leased by pushing `next_attempt_at` forward, in a transaction that does not touch Kafka. The publish happens outside
+   any transaction. A relay that dies after publishing but before marking `PUBLISHED` leaves a row whose lease expires,
+   so the event is published again and deduplicated downstream.
+4. **Consumer** (ADR [0002](docs/adr/0002-inbox-dedup-at-point-of-effect.md)). The inbox insert and the business write
+   share one transaction; the offset is acknowledged only after commit. A redelivered `event_id` violates the inbox
+   primary key and is recorded as `DUPLICATE`. Malformed records go to `events.dlq` on the first attempt
+   (ADR [0006](docs/adr/0006-dead-letter-topic.md)); transient failures are retried with backoff first.
+5. **Redis** (ADR [0005](docs/adr/0005-redis-fails-open.md)) is a replay cache and an advisory rate limiter. Every
+   Redis failure fails open and fails fast; the integration tests run the intake path with Redis stopped.
+
+## Failure scenarios
+
+Each row is exercised by an automated test or by the e2e job; the manual drills in
+[`docs/experiments.md`](docs/experiments.md) reproduce them against the running stack.
+
+| Scenario | Outcome | Covered by |
+|---|---|---|
+| Client retries the same key, serially or in parallel | Same `event_id`, one outbox row | gateway integration test (20 parallel requests) |
+| Same key, different payload | `409 idempotency_key_conflict` | gateway unit + integration tests |
+| Same payload, different key order | Replay, not conflict | gateway unit + integration tests |
+| Redis unavailable | Intake served from Postgres, limiters allow traffic | gateway integration test |
+| Relay crashes after publish, before status update | Republished after lease expiry; inbox absorbs the duplicate | consumer integration test (duplicate record) |
+| Kafka unavailable | Rows back off with jitter up to `relay.max-attempts`, then `FAILED` with a metric | relay unit tests, manual drill |
+| Consumer crash before ack | Redelivered and deduplicated | consumer integration test |
+| Malformed record (bad key, bad JSON, no amount) | Dead-lettered immediately, `DEAD_LETTERED` row written | consumer integration test |
+| Transient DB failure in consumer | Retried with backoff, then dead-lettered | consumer error handler configuration |
+| 30% duplicate keys at 50 concurrent requests | Zero duplicate effects, zero lost events | `make e2e` / CI |
+
+## Operations
+
+**Metrics.** Prometheus text format at `gateway:3000/metrics`, `relay:8080/actuator/prometheus` and
+`consumer:8080/actuator/prometheus` (mapped to host ports 3000, 8081 and 8082 by Compose).
+
+| Signal | Metric | Alert when |
+|---|---|---|
+| Outbox backlog | `outbox_relay_backlog` | grows for longer than the lease |
+| Terminal publish failures | `outbox_relay_failed_total{terminal="true"}` | > 0 |
+| Dead-lettered records | `inbox_dead_lettered_total` | > 0 |
+| Duplicate rate | `inbox_duplicate_total` / `inbox_applied_total` | spikes without a client retry storm |
+| Replay rate | `idempotency_replays_total{source}` | `source="postgres"` dominates (Redis cache not working) |
+| Conflicts | `idempotency_conflicts_total` | > 0 (clients reusing keys incorrectly) |
+
+**Health.** `GET /health` and `GET /ready` on the gateway; `/actuator/health/liveness` and `/readiness` on the Java
+services. All three containers have Docker health checks and Compose waits on them.
+
+**Retention.** The relay deletes `PUBLISHED` outbox rows and idempotency keys older than `relay.retention` (7 days by
+default). A retry after that window is a new request; that window is the idempotency contract.
+
+**Dead letters.** `events.dlq` holds records the consumer gave up on, with the original headers plus the exception.
+There is no automatic replay; inspect with `rpk topic consume events.dlq` inside the `redpanda` container.
 
 ## Configuration
 
-Environment variables (see `docker-compose.yml` and each service's `application.yml`):
+Gateway (environment variables):
 
-| Variable | Used by | Default |
+| Variable | Default | Purpose |
 |---|---|---|
-| `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` | gateway | `127.0.0.1:5432`, `app`/`app` |
-| `REDIS_URL` | all | `redis://127.0.0.1:6379` |
-| `IDEM_TTL_SECONDS`, `IDEM_PROGRESS_TTL_SECONDS` | gateway | `3600`, `30` |
-| `DB_URL`, `DB_USER`, `DB_PASSWORD` | relay, consumer | local Postgres |
-| `KAFKA_BOOTSTRAP` | relay, consumer | `localhost:9092` |
+| `PORT` | `3000` | HTTP port |
+| `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` | `127.0.0.1`, `5432`, `app`, `app`, `app` | Postgres connection |
+| `PGPOOL_MAX` | `20` | Connection pool size; also bounds concurrent waiters on one idempotency key |
+| `REDIS_URL` | `redis://127.0.0.1:6379` | Replay cache |
+| `IDEM_TTL_SECONDS` | `3600` | Redis cache TTL for stored responses |
+| `BODY_LIMIT` | `16kb` | Maximum request body |
+| `SHUTDOWN_TIMEOUT_MS` | `10000` | Grace period for in-flight requests on SIGTERM |
+| `LOG_LEVEL` | `info` | pino level |
 
-Relay and consumer tuning (`batch-size`, `max-attempts`, `rate-limit-per-second`, ...) lives in `application.yml`.
+Relay and consumer (`application.yml`, overridable through `RELAY_*` / `CONSUMER_*` environment variables in Spring's
+relaxed binding, plus `DB_URL`, `DB_USER`, `DB_PASSWORD`, `KAFKA_BOOTSTRAP`, `REDIS_URL`):
 
-## Testing
+| Property | Default | Purpose |
+|---|---|---|
+| `relay.poll-interval` | `1s` | Outbox poll delay |
+| `relay.batch-size` | `200` | Rows claimed per batch; a poll keeps claiming batches until the outbox is drained |
+| `relay.lease` | `15s` | How long a claimed row is invisible to other relays |
+| `relay.base-backoff` / `relay.max-backoff` | `500ms` / `60s` | Exponential backoff with full jitter |
+| `relay.max-attempts` | `10` | After this the row is `FAILED` |
+| `relay.rate-limit-per-second` | `1000` | Redis fixed window; `0` disables |
+| `relay.retention` / `relay.cleanup-interval` | `168h` / `10m` | Pruning of published rows and old keys |
+| `consumer.concurrency` | `3` | Listener threads |
+| `consumer.max-retries` / `consumer.retry-backoff` | `5` / `500ms` | Retries before dead-lettering |
+| `consumer.dead-letter-topic` | `events.dlq` | Where poison and exhausted records go |
+| `consumer.rate-limit-per-second` | `1000` | Redis fixed window; `0` disables |
 
-CI builds both Java services, syntax-checks the gateway and bench script, and validates the Compose file. There are no
-unit or integration tests yet; correctness is checked through the load profiles and invariant queries above.
+## Development
 
-## Limitations
+```bash
+make lint   # eslint + prettier, spotless (google-java-format), ruff
+make test   # unit + Testcontainers integration tests (needs Docker)
+make e2e    # full stack + load + invariant verification
+```
 
-- Consumer errors are retried by Spring Kafka's default error handler (bounded), after which the record is skipped and
-  logged. There is no dead-letter topic, so a persistently failing record can be dropped from the consumer's view.
-- The consumer's `consumer_attempts` table records outcomes but there is no terminal `FAILED` state for events.
-- Rate limiting is a global fixed-window counter in Redis, not per tenant.
-- One Kafka topic, one event type, and a demo business effect (`business_state`).
-- No authentication on the gateway; no graceful shutdown in the Java services; no TLS.
-- Single-node Redpanda and Postgres; no multi-broker or failover testing.
+CI runs the same targets on every push: gateway, relay and consumer each in their own job, plus the e2e job against the
+Compose stack. Tagged releases build multi-arch images to GHCR. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Roadmap
+## Limitations and non-goals
 
-Automated failure-injection tests, a dead-letter topic, per-tenant rate limits, outbox cleanup, and published
-benchmark results.
+- One topic, one event type, and a deliberately small business effect. The point is the delivery chain, not the
+  domain.
+- Ordering is not guaranteed. Events are keyed by `event_id`; nothing depends on sequence.
+- The rate limiters are global fixed windows: a backpressure knob, not fairness or protection.
+- No authentication, no TLS, no multi-tenant isolation. See [SECURITY.md](SECURITY.md).
+- Single-broker Redpanda and single Postgres in Compose; the design does not depend on that, but failover is not
+  tested here.
+- `inbox_events` is not pruned. A production deployment would remove rows older than the maximum redelivery window.
 
 ## License
 

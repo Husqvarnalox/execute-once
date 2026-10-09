@@ -10,3 +10,6 @@ __pycache__/
 .idea/
 .vscode/
 graphify-out/
+e2e-out/
+*.report.json
+.ruff_cache/
