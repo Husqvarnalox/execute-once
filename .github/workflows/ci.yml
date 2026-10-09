@@ -91,6 +91,9 @@ jobs:
         run: docker compose --profile bench build
       - name: Start stack
         run: docker compose up -d --wait --wait-timeout 180
+      - name: Prepare report directory
+        # The bench container runs as uid 10001; a bind mount Docker creates itself is root-owned.
+        run: mkdir -p e2e-out && chmod 777 e2e-out
       - name: dup30 profile with verification
         run: |
           docker compose --profile bench run --rm \

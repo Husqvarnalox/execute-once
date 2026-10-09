@@ -1,27 +1,54 @@
+# Patch and minor updates only. Major bumps of the toolchain (JDK, Node, Spring Boot, base images) are
+# deliberate decisions made in a PR of their own, not a Dependabot drive-by.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
   - package-ecosystem: npm
     directory: /services/gateway-node
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
     groups:
       gateway-deps:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: maven
     directory: /services
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
     groups:
-      spring:
-        patterns: ["org.springframework*"]
+      maven-deps:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: pip
     directory: /scripts/python-bench
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      bench-deps:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: docker
     directories:
       - /services/gateway-node
@@ -29,4 +56,8 @@ updates:
       - /services/consumer-java
       - /scripts/python-bench
     schedule:
-      interval: weekly
+      interval: monthly
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

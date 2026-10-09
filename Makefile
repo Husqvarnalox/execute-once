@@ -44,6 +44,7 @@ test-bench: ## Bench static checks
 
 e2e: ## Full-stack end-to-end run: dup30 profile with invariant verification
 	$(COMPOSE) up -d --build --wait
+	mkdir -p e2e-out && chmod 777 e2e-out
 	$(COMPOSE) --profile bench run --rm -v "$$PWD/e2e-out:/out" bench --profile dup30 --total 500 --report /out/dup30.json
 	$(COMPOSE) down -v --remove-orphans
 
