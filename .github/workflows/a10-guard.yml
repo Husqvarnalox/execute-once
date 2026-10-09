@@ -1,0 +1,131 @@
+# Supply-chain guard against the "A10 / Contagious Interview" pattern: a forged tip commit that
+# adds a loader to a build config, a fake font launched by a VS Code auto-run task, or a package.json
+# lifecycle script. The job only reads the checked-out tree and the git log with git, grep, awk, wc
+# and xxd. It never installs dependencies or executes anything from the repository.
+#
+# Indicator values below are patterns to grep for, not payloads. SECURITY.md lists them for humans.
+name: a10-guard
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  a10-guard:
+    name: a10-guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan tree and commits
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -u
+          export LC_ALL=C.UTF-8
+          fail=0
+          die() { echo "::error::$*"; fail=1; }
+          SELF='.github/workflows/a10-guard.yml'
+
+          # Hard indicators: C2, dead-drop wallet, loader paths, env knob.
+          IOC='0xa322E5f3D311D3080e6f0121063e9aDC2490Ef1a|193\.247\.144\.38|/0x/cls|/0x/ls|INDEXER_URL'
+          RPC='publicnode|drpc\.org|blockscout|1rpc\.io'
+          MOJI='[ΓΓ╬╠╢╤╦╨╚║┐┘┬┴]{3,}'
+
+          echo "== 1. VS Code auto-run tasks"
+          if [ -f .vscode/tasks.json ]; then
+            if grep -q 'folderOpen' .vscode/tasks.json; then
+              die '.vscode/tasks.json: task with "runOn": "folderOpen" (auto-executes when the folder is opened)'
+            fi
+            # node invoked on anything that is not a source file, or anything under an asset directory
+            bad=$(grep -oE '\bnode[[:space:]]+[^" ]+' .vscode/tasks.json \
+              | awk '{p=$2; if (p !~ /\.(js|mjs|cjs|ts)$/ || p ~ /(^|\/)(public|fonts|assets|static)\//) print p}')
+            if [ -n "$bad" ]; then die ".vscode/tasks.json: task runs node on a non-source path: $bad"; fi
+          fi
+
+          echo "== 2. Font files that are not fonts"
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              *fa-solid-*.woff|*fa-solid-*.woff2|*fa-solid-*.eot|*fa-solid-*.ttf|*fa-solid-*.otf)
+                die "$f: fa-solid-* font file name is an A10 indicator";;
+            esac
+            case "$f" in
+              *.woff|*.woff2|*.eot|*.ttf|*.otf)
+                magic=$(xxd -p -l 4 "$f")
+                eot=$(xxd -p -s 34 -l 2 "$f")
+                case "$magic" in
+                  774f4646|774f4632|00010000|4f54544f|74727565) ;;   # wOFF wOF2 \0\1\0\0 OTTO true
+                  *) [ "$eot" = "4c50" ] || die "$f: not a font (first bytes $magic); text or JavaScript in a font file";;
+                esac;;
+            esac
+          done < <(git ls-files -z)
+
+          echo "== 3. Build/tool config files"
+          while IFS= read -r -d '' f; do
+            size=$(wc -c < "$f")
+            if [ "$size" -gt 4096 ]; then die "$f: $size bytes, config files over 4 KB are padded loaders until proven otherwise"; fi
+            if grep -qiE "$IOC" "$f"; then die "$f: contains an A10 indicator"; fi
+            if grep -q 'eth_call' "$f" && grep -qE "$RPC" "$f"; then die "$f: eth_call against a public RPC (dead-drop resolver)"; fi
+            if grep -q 'child_process' "$f" && grep -qE 'eval\(|new Function\(' "$f"; then die "$f: child_process together with eval/new Function"; fi
+            if grep -oE '[A-Za-z0-9+/=]+' "$f" | awk 'length($0) > 2000 { found = 1 } END { exit !found }'; then
+              die "$f: base64/hex blob longer than 2000 characters"
+            fi
+          done < <(git ls-files -z -- '*.config.js' '*.config.mjs' '*.config.cjs' '*.config.ts')
+
+          echo "== 4. Hard indicators anywhere in the tree"
+          if git grep -nIiE "$IOC" -- . ":(exclude)$SELF" ':(exclude)SECURITY.md'; then
+            die "A10 indicator found outside SECURITY.md"
+          fi
+
+          echo "== 5. package.json lifecycle scripts"
+          while IFS= read -r -d '' f; do
+            if grep -nE '"(preinstall|install|postinstall|prepare)"[[:space:]]*:[[:space:]]*"[^"]*(\bnode\b|curl|wget)' "$f"; then
+              die "$f: lifecycle script runs node, curl or wget"
+            fi
+          done < <(git ls-files -z -- 'package.json' '*/package.json')
+
+          echo "== 6. Workflows must not use pull_request_target"
+          if git grep -ln 'pull_request_target' -- '.github/workflows' ":(exclude)$SELF"; then
+            die "pull_request_target grants secrets to fork code; use pull_request"
+          fi
+
+          echo "== 7. Commit forensics"
+          zeros=0000000000000000000000000000000000000000
+          case "$EVENT" in
+            pull_request) range="$BASE_SHA..$HEAD_SHA" ;;
+            push)
+              if [ "$BEFORE" != "$zeros" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                range="$BEFORE..$AFTER"
+                if ! git merge-base --is-ancestor "$BEFORE" "$AFTER"; then
+                  echo "::warning::non-fast-forward push: $BEFORE is not an ancestor of $AFTER"
+                fi
+              else
+                echo "::warning::previous tip $BEFORE not available (new branch or force push); checking the last 200 commits"
+                range="--max-count=200 $AFTER"
+              fi ;;
+            *) range="--max-count=200 HEAD" ;;
+          esac
+          # shellcheck disable=SC2086
+          while IFS=$'\t' read -r sha at atz ct ctz; do
+            if [ "$at" = "$ct" ] && [ "$atz" != "$ctz" ]; then
+              die "commit ${sha:0:12}: author tz $atz differs from committer tz $ctz with identical epoch (forged-commit signature)"
+            fi
+            if git log -1 --format=%B "$sha" | grep -qE "$MOJI"; then
+              die "commit ${sha:0:12}: CP437 mojibake in the commit message"
+            fi
+          done < <(git log --format='%H%x09%at%x09%ai%x09%ct%x09%ci' $range \
+                   | awk -F'\t' '{ split($3, a, " "); split($5, c, " "); print $1 "\t" $2 "\t" a[3] "\t" $4 "\t" c[3] }')
+
+          if [ "$fail" -ne 0 ]; then echo "::error::a10-guard failed"; exit 1; fi
+          echo "a10-guard: clean"

@@ -1,1 +1,16 @@
 * @Husqvarnalox
+
+# Anything that can execute at install, build or editor-open time stays under explicit ownership
+# even if the catch-all above is ever narrowed. See SECURITY.md, "Supply-chain hardening".
+/.vscode/            @Husqvarnalox
+/.github/            @Husqvarnalox
+public/fonts/        @Husqvarnalox
+*.config.*           @Husqvarnalox
+package.json         @Husqvarnalox
+package-lock.json    @Husqvarnalox
+yarn.lock            @Husqvarnalox
+pnpm-lock.yaml       @Husqvarnalox
+pom.xml              @Husqvarnalox
+requirements.txt     @Husqvarnalox
+Dockerfile           @Husqvarnalox
+docker-compose*.yml  @Husqvarnalox

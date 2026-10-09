@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Supply-chain guard workflow `a10-guard` (forged-commit forensics, fake fonts, padded build configs, lifecycle scripts, VS Code auto-run tasks), branch and tag rulesets, SHA-pinned actions, CODEOWNERS for executable surfaces, IOC list in SECURITY.md.
 - Unit and Testcontainers integration tests for the gateway, relay and consumer; CI runs them on every push.
 - End-to-end CI job: Compose stack, `dup30` and `normal` load profiles, invariant verification.
 - Dead-letter topic (`events.dlq`) for poison and exhausted records, with a terminal `DEAD_LETTERED` attempt row.

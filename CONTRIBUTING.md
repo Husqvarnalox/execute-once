@@ -39,3 +39,12 @@ affects; "none" is a fine answer for refactors.
 
 Formatting is enforced, not reviewed: `prettier` for JavaScript, `google-java-format` via Spotless for Java, `ruff
 format` for Python. Run `make lint` before pushing.
+
+## Editor and tooling safety
+
+- `.vscode/` is git-ignored. Do not commit `tasks.json`; a task that runs on `folderOpen` executes before anyone
+  reads the diff. Keep `"task.allowAutomaticTasks": "off"` in your VS Code user settings.
+- Do not add `preinstall`, `install`, `postinstall` or `prepare` scripts to `package.json` that run `node`, `curl`
+  or `wget`. Build-tool config files (`*.config.{js,mjs,cjs,ts}`) stay under 4 KB and contain no encoded blobs.
+- The `a10-guard` workflow enforces both rules and is a required check on `main`. See SECURITY.md for the threat
+  model and the indicator list.
