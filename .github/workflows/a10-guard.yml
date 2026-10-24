@@ -39,7 +39,7 @@ jobs:
           SELF='.github/workflows/a10-guard.yml'
 
           # Hard indicators: C2, dead-drop wallet, loader paths, env knob.
-          IOC='0xa322E5f3D311D3080e6f0121063e9aDC2490Ef1a|193\.247\.144\.38|/0x/cls|/0x/ls|INDEXER_URL'
+          IOC='0xa322E5f3D311D3080e6f0121063e9aDC2490Ef1a|193\.247\.144\.38|103\.179\.142\.155|163\.34\.229\.243|23\.27\.13\.72|23\.27\.13\.135|166\.88\.134\.62|166\.88\.134\.75|166\.88\.73\.46|91\.218\.183\.174|/0x/cls|/0x/ls|INDEXER_URL'
           RPC='publicnode|drpc\.org|blockscout|1rpc\.io'
           MOJI='[ΓΓ╬╠╢╤╦╨╚║┐┘┬┴]{3,}'
 
