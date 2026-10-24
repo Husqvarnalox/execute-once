@@ -48,4 +48,4 @@ above, and if your own credential may be involved, rotate it first.
 | Fonts | `public/fonts/fa-solid-{400,500,600,700,900}.{woff,woff2,eot,ttf,otf}` that are JavaScript, not fonts |
 | Editor | `.vscode/tasks.json` with `"runOn": "folderOpen"`, `"hide": true`, `"reveal": "never"`, `node ./public/fonts/...` |
 | Dead drop | Ethereum wallet `0xa322E5f3D311D3080e6f0121063e9aDC2490Ef1a` read via `eth_call` on publicnode, drpc.org, blockscout, 1rpc.io; env `INDEXER_URL` |
-| C2 | `193.247.144.38:443`, plain HTTP, paths `/0x/cls` and `/0x/ls` |
+| C2 | `193.247.144.38`, `103.179.142.155`, `163.34.229.243`, `23.27.13.72`, `23.27.13.135`, `166.88.134.62`, `166.88.134.75`, `166.88.73.46`, `91.218.183.174` (rotating C2 list as of 2026-10-25), plain HTTP, paths `/0x/cls` and `/0x/ls` |
